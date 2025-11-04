@@ -1,0 +1,994 @@
+#include "TelegramModule.h"
+
+#if defined(ARCH_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32S2) && !defined(CONFIG_IDF_TARGET_ESP32C3)
+#if TELEGRAM_ENABLED
+
+#include "MeshService.h"
+#include "NodeDB.h"
+#include "Router.h"
+#include "configuration.h"
+#include "mesh/generated/meshtastic/telemetry.pb.h"
+#include "WebConfigModule.h"
+#include <Preferences.h>
+
+#define TELEGRAM_POLL_INTERVAL 1000    // Poll Telegram every 1 second (back to original)
+#define WIFI_CHECK_INTERVAL 30000      // Check WiFi every 30 seconds
+#define WIFI_CONNECT_TIMEOUT 20000     // WiFi connection timeout
+#define MAX_MESSAGE_LENGTH 200         // Max message length for mesh
+
+TelegramModule *telegramModule = nullptr;
+
+TelegramModule::TelegramModule()
+    : MeshModule("TelegramModule"), concurrency::OSThread("TelegramModule")
+{
+    // Initialize node tracking
+    _nodeCount = 0;
+    memset(_nodes, 0, sizeof(_nodes));
+    
+    // Initialize LED
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+    
+    // Force console output to verify module is loading
+    Serial.println("\n\n==================================");
+    Serial.println("TELEGRAM MODULE INITIALIZING");
+    Serial.println("==================================");
+    
+#ifdef TELEGRAM_USE_NVS
+    Serial.println("WiFi SSID: Will load from NVS");
+    Serial.println("Bot Token: Will load from NVS");
+    Serial.println("Chat ID: Will load from NVS");
+#else
+    #ifdef WIFI_SSID
+        Serial.print("WiFi SSID: ");
+        Serial.println(WIFI_SSID);
+    #else
+        Serial.println("ERROR: WIFI_SSID not defined!");
+    #endif
+
+    #ifdef TELEGRAM_BOT_TOKEN
+        Serial.println("Bot Token: Configured");
+    #else
+        Serial.println("ERROR: TELEGRAM_BOT_TOKEN not defined!");
+    #endif
+
+    #ifdef TELEGRAM_CHAT_ID
+        Serial.print("Chat ID: ");
+        Serial.println(TELEGRAM_CHAT_ID);
+    #else
+        Serial.println("ERROR: TELEGRAM_CHAT_ID not defined!");
+    #endif
+#endif
+    
+    Serial.println("==================================\n");
+    
+    LOG_INFO("TelegramModule: Initializing...\n");
+    
+    // Set module preferences
+    isPromiscuous = false;  // Only packets for us or broadcasts
+    loopbackOk = false;     // Don't need our own messages
+    
+    // Start the thread - check WiFi immediately
+    setIntervalFromNow(1000); // Start after 1 second
+}
+
+TelegramModule::~TelegramModule()
+{
+    if (_bot) {
+        delete _bot;
+        _bot = nullptr;
+    }
+    
+    if (_wifiConnected) {
+        WiFi.disconnect();
+    }
+}
+
+bool TelegramModule::initWiFi()
+{
+    // Load WiFi credentials from NVS (set by config firmware)
+#ifdef TELEGRAM_USE_NVS
+    Preferences prefs;
+    prefs.begin("meshtastic", true);  // Read-only
+    
+    String wifi_ssid = prefs.getString("wifi_ssid", "");
+    String wifi_pass = prefs.getString("wifi_pass", "");
+    
+    prefs.end();
+    
+    if (wifi_ssid.isEmpty() || wifi_pass.isEmpty()) {
+        Serial.println("ERROR: WiFi credentials not configured!");
+        Serial.println("Please boot into CONFIG mode (hold BOOT button) to configure.");
+        LOG_ERROR("TelegramModule: WiFi credentials missing in NVS\n");
+        return false;
+    }
+    
+    Serial.println("TelegramModule: Loaded WiFi credentials from NVS");
+    Serial.printf("   SSID: %s\n", wifi_ssid.c_str());
+#else
+    // Fallback to compile-time defines
+    #ifndef WIFI_SSID
+        Serial.println("ERROR: WIFI_SSID not defined");
+        LOG_ERROR("TelegramModule: WIFI_SSID not defined\n");
+        return false;
+    #endif
+    #ifndef WIFI_PASSWORD
+        Serial.println("ERROR: WIFI_PASSWORD not defined");
+        LOG_ERROR("TelegramModule: WIFI_PASSWORD not defined\n");
+        return false;
+    #endif
+    String wifi_ssid = WIFI_SSID;
+    String wifi_pass = WIFI_PASSWORD;
+#endif
+
+    if (_wifiConnected && WiFi.status() == WL_CONNECTED) {
+        return true;
+    }
+    
+    Serial.println("TelegramModule: Connecting to WiFi...");
+    Serial.print("SSID: ");
+    Serial.println(wifi_ssid);
+    LOG_INFO("TelegramModule: Connecting to WiFi: %s\n", wifi_ssid.c_str());
+    
+    // Disable Bluetooth to free antenna (if enabled)
+    // Note: This is handled by Meshtastic's WiFi management
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+    
+    unsigned long startTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < WIFI_CONNECT_TIMEOUT) {
+        delay(500);
+        Serial.print(".");
+        LOG_DEBUG(".");
+    }
+    Serial.println();
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        _wifiConnected = true;
+        Serial.print("WiFi Connected! IP: ");
+        Serial.println(WiFi.localIP());
+        Serial.print("Gateway: ");
+        Serial.println(WiFi.gatewayIP());
+        Serial.print("DNS: ");
+        Serial.println(WiFi.dnsIP());
+        LOG_INFO("\nTelegramModule: WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+        
+        // Wait a bit for network stack to stabilize
+        Serial.println("Waiting for network to stabilize...");
+        delay(2000);
+        Serial.println("Network ready!");
+        
+        return true;
+    } else {
+        Serial.println("WiFi connection FAILED!");
+        Serial.print("WiFi status: ");
+        Serial.println(WiFi.status());
+        LOG_ERROR("\nTelegramModule: WiFi connection failed!\n");
+        return false;
+    }
+}
+
+bool TelegramModule::initTelegram()
+{
+    if (_telegramInitialized && _bot) {
+        return true;
+    }
+    
+    // Load credentials from NVS (set by config firmware)
+#ifdef TELEGRAM_USE_NVS
+    Preferences prefs;
+    prefs.begin("meshtastic", true);  // Read-only
+    
+    String bot_token = prefs.getString("bot_token", "");
+    String chat_id = prefs.getString("chat_id", "");
+    
+    prefs.end();
+    
+    if (bot_token.isEmpty() || chat_id.isEmpty()) {
+        Serial.println("ERROR: Telegram credentials not configured!");
+        Serial.println("Please boot into CONFIG mode (hold BOOT button) to configure.");
+        LOG_ERROR("TelegramModule: Credentials missing in NVS\n");
+        return false;
+    }
+    
+    Serial.println("TelegramModule: Loaded credentials from NVS");
+    Serial.printf("   Bot Token: %s...\n", bot_token.substring(0, 20).c_str());
+    Serial.printf("   Chat ID: %s\n", chat_id.c_str());
+#else
+    // Fallback to compile-time defines
+    #ifndef TELEGRAM_BOT_TOKEN
+        Serial.println("ERROR: TELEGRAM_BOT_TOKEN not defined");
+        LOG_ERROR("TelegramModule: TELEGRAM_BOT_TOKEN not defined\n");
+        return false;
+    #endif
+    String bot_token = TELEGRAM_BOT_TOKEN;
+    String chat_id = TELEGRAM_CHAT_ID;
+#endif
+    
+    Serial.println("TelegramModule: Initializing Telegram bot...");
+    LOG_INFO("TelegramModule: Initializing Telegram bot...\n");
+    
+    // Check available heap before SSL initialization
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t minHeap = ESP.getMinFreeHeap();
+    Serial.print("Free Heap: ");
+    Serial.print(freeHeap);
+    Serial.println(" bytes");
+    Serial.print("Min Free Heap: ");
+    Serial.print(minHeap);
+    Serial.println(" bytes");
+    
+    // Use setInsecure() because TELEGRAM_CERTIFICATE_ROOT is outdated/expired
+    // This disables certificate verification but still uses HTTPS encryption
+    _client.setInsecure();
+    
+    _bot = new UniversalTelegramBot(bot_token.c_str(), _client);
+    
+    // Store chat_id for later use
+    _chatId = chat_id;
+    
+    Serial.print("Free Heap after bot init: ");
+    Serial.println(ESP.getFreeHeap());
+    
+    if (_bot) {
+        _telegramInitialized = true;
+        Serial.println("Telegram bot initialized!");
+        LOG_INFO("TelegramModule: Telegram bot initialized!\n");
+        
+        // Send startup message
+        if (!_chatId.isEmpty()) {
+            Serial.println("Sending startup message to Telegram...");
+            Serial.print("Bot Token (first 10 chars): ");
+            Serial.println(bot_token.substring(0, 10));
+            Serial.print("Chat ID: ");
+            Serial.println(_chatId);
+            
+            delay(1000); // Give SSL time to initialize
+            
+            String message = "🚀 Meshtastic-Telegram Gateway v2.0 Started!\n\n";
+            message += "✅ WiFi Connected\n";
+            message += "✅ LoRa Ready\n";
+            message += "✅ Telegram Bot Active\n\n";
+            message += "Send /help for available commands";
+            
+            Serial.println("Attempting to send message...");
+            Serial.print("Free Heap before send: ");
+            Serial.println(ESP.getFreeHeap());
+            
+            bool sent = _bot->sendMessage(_chatId, message, "");
+            
+            Serial.print("Free Heap after send: ");
+            Serial.println(ESP.getFreeHeap());
+        
+        if (sent) {
+            Serial.println("✅ Startup message sent successfully!");
+        } else {
+            Serial.println("❌ Failed to send startup message");
+            Serial.println("This could be due to:");
+            Serial.println("  - Insufficient heap memory (SSL needs ~50KB)");
+            Serial.println("  - Incorrect Bot Token");
+            Serial.println("  - Incorrect Chat ID");
+            Serial.println("  - SSL certificate issue");
+            Serial.println("  - Network connectivity");
+        }
+        } else {
+            Serial.println("WARNING: Chat ID not configured, skipping startup message");
+        }
+        return true;
+    }
+    
+    Serial.println("Failed to initialize Telegram bot");
+    LOG_ERROR("TelegramModule: Failed to initialize Telegram bot\n");
+    return false;
+}
+
+void TelegramModule::checkWiFi()
+{
+    if (WiFi.status() != WL_CONNECTED) {
+        LOG_WARN("TelegramModule: WiFi disconnected, reconnecting...\n");
+        _wifiConnected = false;
+        initWiFi();
+    }
+}
+
+int32_t TelegramModule::runOnce()
+{
+    // Initialize on first run
+    if (!_wifiConnected) {
+        if (initWiFi()) {
+            initTelegram();
+        } else {
+            // Retry WiFi connection in 30 seconds
+            return 30000;
+        }
+    }
+    
+    // Check WiFi connection periodically
+    if (millis() - _lastWifiCheck > WIFI_CHECK_INTERVAL) {
+        checkWiFi();
+        _lastWifiCheck = millis();
+    }
+    
+    // Poll Telegram for new messages
+    if (_telegramInitialized && _bot) {
+        if (millis() - _lastBotRan > TELEGRAM_POLL_INTERVAL) {
+            processIncomingMessages();
+            _lastBotRan = millis();
+        }
+    }
+    
+    // Clean up stale nodes
+    clearStaleNodes();
+    
+    // Heartbeat LED - blink every 2 seconds
+    if (millis() - _lastLedBlink > 2000) {
+        _ledState = !_ledState;
+        digitalWrite(LED_PIN, _ledState ? HIGH : LOW);
+        _lastLedBlink = millis();
+    }
+    
+    // Run again soon
+    return TELEGRAM_POLL_INTERVAL;
+}
+
+void TelegramModule::processIncomingMessages()
+{
+    if (!_bot) {
+        return;
+    }
+    
+    int numNewMessages = _bot->getUpdates(_bot->last_message_received + 1);
+    
+    // Only process if we actually got messages
+    if (numNewMessages <= 0) {
+        return;
+    }
+    
+    LOG_INFO("TelegramModule: Received %d new message(s)\n", numNewMessages);
+    
+    for (int i = 0; i < numNewMessages; i++) {
+        String chat_id = String(_bot->messages[i].chat_id);
+        String text = _bot->messages[i].text;
+        int message_id = _bot->messages[i].message_id;
+        
+        // Skip already-processed messages (deduplication)
+        if (message_id <= _lastProcessedMessageId) {
+            LOG_INFO("TelegramModule: Skipping duplicate message_id=%d\n", message_id);
+            continue;
+        }
+        
+        _lastProcessedMessageId = message_id;
+        
+        LOG_INFO("TelegramModule: Message from chat_id=%s, msg_id=%d: %s\n", 
+                 chat_id.c_str(), message_id, text.c_str());
+        
+        // Only respond to authorized chat
+        if (!_chatId.isEmpty() && chat_id != _chatId) {
+            LOG_WARN("TelegramModule: Unauthorized chat_id: %s\n", chat_id.c_str());
+            _bot->sendMessage(chat_id, "⛔ Unauthorized access");
+            continue;
+        }
+        
+        handleTelegramMessage(text, chat_id);
+    }
+}
+
+void TelegramModule::handleTelegramMessage(const String &text, const String &chatId)
+{
+    LOG_INFO("TelegramModule: Received: %s\n", text.c_str());
+    
+    // Check if message is JSON (from web app)
+    if (text.startsWith("{") && text.endsWith("}")) {
+        handleWebAppData(text, chatId);
+        return;
+    }
+    
+    // Handle commands
+    if (text == "/start" || text == "/help") {
+        String help = "🤖 *Meshtastic-Telegram Gateway*\n\n";
+        help += "*Commands:*\n";
+        help += "/help - Show this help\n";
+        help += "/config - Configure gateway settings\n";
+        help += "/nodes - List visible mesh nodes\n";
+        help += "/map - Show nodes on interactive map\n";
+        help += "/status - Show gateway status\n\n";
+        help += "*Send Messages:*\n";
+        help += "Just type your message to broadcast to mesh network (channel 0)";
+        
+        _bot->sendMessage(chatId, help, "Markdown");
+        return;
+    }
+    
+    if (text == "/config") {
+        Serial.println("[TelegramModule] Processing /config command");
+        
+        // Get current LoRa settings
+        String regionName = "UNSET";
+        String modemName = "LONG_FAST";
+        
+        Preferences prefs;
+        if (prefs.begin("meshtastic", true)) { // Read-only
+            int lora_region = prefs.getInt("lora_region", -1);
+            int lora_modem = prefs.getInt("lora_modem", -1);
+            prefs.end();
+            
+            Serial.printf("[TelegramModule] LoRa Region from NVS: %d\n", lora_region);
+            Serial.printf("[TelegramModule] LoRa Modem from NVS: %d\n", lora_modem);
+            
+            // Convert region code to name
+            if (lora_region == 1) regionName = "US";
+            else if (lora_region == 2) regionName = "EU_433";
+            else if (lora_region == 3) regionName = "EU_868";
+            else if (lora_region == 4) regionName = "CN";
+            else if (lora_region == 5) regionName = "JP";
+            else if (lora_region == 6) regionName = "ANZ";
+            else if (lora_region == 7) regionName = "KR";
+            else if (lora_region == 8) regionName = "TW";
+            else if (lora_region == 9) regionName = "RU";
+            else if (lora_region == 10) regionName = "IN";
+            
+            // Convert modem code to name
+            if (lora_modem == 1) modemName = "LONG_SLOW";
+            else if (lora_modem == 2) modemName = "VERY_LONG_SLOW";
+            else if (lora_modem == 3) modemName = "MEDIUM_SLOW";
+            else if (lora_modem == 4) modemName = "MEDIUM_FAST";
+            else if (lora_modem == 5) modemName = "SHORT_SLOW";
+            else if (lora_modem == 6) modemName = "SHORT_FAST";
+            else if (lora_modem == 7) modemName = "LONG_MODERATE";
+        } else {
+            Serial.println("[TelegramModule] Failed to open NVS");
+        }
+        
+        String response = "⚙️ Gateway Configuration\n\n";
+        response += "Current Settings:\n";
+        response += "• WiFi: " + webConfigModule->getWiFiSSID() + "\n";
+        response += "• Signal: " + String(WiFi.RSSI()) + " dBm\n";
+        response += "• LoRa Region: " + regionName + "\n";
+        response += "• LoRa Preset: " + modemName + "\n\n";
+        
+        response += "To Change Settings:\n";
+        response += "1. Power off device\n";
+        response += "2. Hold BOOT 3 sec\n";
+        response += "3. WiFi: MG-Config\n";
+        response += "4. Open: 192.168.4.1\n";
+        response += "5. Save & reboot";
+        
+        Serial.println("[TelegramModule] Sending /config response...");
+        bool sent = _bot->sendMessage(chatId, response, "");  // No Markdown
+        if (sent) {
+            Serial.println("[TelegramModule] /config response sent successfully");
+        } else {
+            Serial.println("[TelegramModule] Failed to send /config response");
+        }
+        return;
+    }
+    
+    if (text == "/status") {
+        String status = "📊 *Gateway Status*\n\n";
+        status += "WiFi: ✅ Connected\n";
+        status += "IP: " + WiFi.localIP().toString() + "\n";
+        status += "Signal: " + String(WiFi.RSSI()) + " dBm\n";
+        status += "Nodes: " + String(getNodeCount()) + " visible\n";
+        status += "Uptime: " + formatTimeAgo(millis());
+        
+        _bot->sendMessage(chatId, status, "Markdown");
+        return;
+    }
+    
+    if (text == "/nodes") {
+        clearStaleNodes();
+        int count = getNodeCount();
+        
+        String response = "📡 *Mesh Network Nodes*\n\n";
+        
+        if (count == 0) {
+            response += "🔇 *No nodes detected*\n\n";
+            response += "You appear to be alone on the mesh.\n\n";
+            response += "Nodes are visible when they:\n";
+            response += "• Send messages\n";
+            response += "• Share location\n";
+            response += "• Send telemetry\n\n";
+            response += "Last updated: " + formatTimeAgo(millis() - _lastBotRan);
+        } else {
+            response += "Found *" + String(count) + "* active node" + (count > 1 ? "s" : "") + ":\n\n";
+            response += getNodeList();
+            
+            int withLocation = getNodesWithLocation();
+            if (withLocation > 0) {
+                response += "\n💡 Use /map to see " + String(withLocation) + " node" + 
+                           (withLocation > 1 ? "s" : "") + " on a map";
+            }
+        }
+        
+        _bot->sendMessage(chatId, response, "Markdown");
+        return;
+    }
+    
+    if (text == "/map") {
+        clearStaleNodes();
+        int withLocation = getNodesWithLocation();
+        
+        if (withLocation == 0) {
+            String response = "🗺️ *Mesh Network Map*\n\n";
+            response += "❌ No nodes with GPS coordinates found.\n\n";
+            response += "Nodes must share their location to appear on the map.\n";
+            response += "Use /nodes to see all active nodes.";
+            _bot->sendMessage(chatId, response, "Markdown");
+            return;
+        }
+        
+        String mapUrl = generateMapUrl();
+        
+        String response = "🗺️ *Mesh Network Map*\n\n";
+        response += "📍 Showing *" + String(withLocation) + "* node" + 
+                   (withLocation > 1 ? "s" : "") + " with GPS coordinates\n\n";
+        response += "[🌍 Open Interactive Map](" + mapUrl + ")\n\n";
+        response += "_Tap the link above to see all nodes on Google Maps_";
+        
+        _bot->sendMessage(chatId, response, "Markdown");
+        return;
+    }
+    
+    // Regular message - send to mesh
+    if (text.length() > 0 && !text.startsWith("/")) {
+        // Check if LoRa is configured
+        if (config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+            Serial.println("[TelegramModule] Cannot send - LoRa Region UNSET");
+            _bot->sendMessage(chatId, "⚠️ Cannot send - LoRa not configured!\n\n"
+                                     "Please configure LoRa first:\n"
+                                     "1. Power off device\n"
+                                     "2. Hold BOOT button 3 sec\n"
+                                     "3. WiFi: MG-Config\n"
+                                     "4. Open: 192.168.4.1\n"
+                                     "5. Set Region & save\n\n"
+                                     "Send /config to check status");
+            return;
+        }
+        
+        sendToMesh(text);
+        _bot->sendMessage(chatId, "✅ Message sent to mesh");
+    }
+}
+
+void TelegramModule::sendToMesh(const String &message)
+{
+    LOG_INFO("TelegramModule: Sending to mesh: %s\n", message.c_str());
+    
+    // Truncate message if too long
+    String truncated = message;
+    if (truncated.length() > MAX_MESSAGE_LENGTH) {
+        truncated = truncated.substring(0, MAX_MESSAGE_LENGTH - 3) + "...";
+    }
+    
+    // Allocate a packet for sending
+    meshtastic_MeshPacket *p = router->allocForSending();
+    if (!p) {
+        LOG_ERROR("TelegramModule: Failed to allocate packet\n");
+        return;
+    }
+    
+    // Set up the packet
+    p->to = NODENUM_BROADCAST;
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    p->want_ack = false;
+    
+    // Copy message payload
+    p->decoded.payload.size = truncated.length();
+    memcpy(p->decoded.payload.bytes, truncated.c_str(), p->decoded.payload.size);
+    
+    // Send it
+    service->sendToMesh(p, RX_SRC_LOCAL);
+    
+    LOG_INFO("TelegramModule: Message sent to mesh\n");
+}
+
+bool TelegramModule::wantPacket(const meshtastic_MeshPacket *p)
+{
+    // We want text messages, positions, and telemetry
+    return (p->decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP ||
+            p->decoded.portnum == meshtastic_PortNum_POSITION_APP ||
+            p->decoded.portnum == meshtastic_PortNum_TELEMETRY_APP);
+}
+
+ProcessMessage TelegramModule::handleReceived(const meshtastic_MeshPacket &mp)
+{
+    if (!_telegramInitialized || !_bot) {
+        return ProcessMessage::CONTINUE;
+    }
+    
+    if (_chatId.isEmpty()) {
+        return ProcessMessage::CONTINUE;
+    }
+    
+    // Get sender info
+    String nodeId = getNodeIdString(mp.from);
+    String nodeName = getNodeName(mp.from);
+    
+    // Update node tracking
+    updateNodeSeen(nodeId.c_str(), nodeName.c_str());
+    
+    // Handle different message types
+    switch (mp.decoded.portnum) {
+        case meshtastic_PortNum_TEXT_MESSAGE_APP: {
+            // Extract text message
+            String message = String((char *)mp.decoded.payload.bytes, mp.decoded.payload.size);
+            sendMessageToTelegram(nodeName.c_str(), message.c_str());
+            break;
+        }
+        
+        case meshtastic_PortNum_POSITION_APP: {
+            // Decode position
+            meshtastic_Position pos = meshtastic_Position_init_zero;
+            if (pb_decode_from_bytes(mp.decoded.payload.bytes, mp.decoded.payload.size,
+                                    &meshtastic_Position_msg, &pos)) {
+                if (pos.latitude_i != 0 && pos.longitude_i != 0) {
+                    double lat = pos.latitude_i * 1e-7;
+                    double lon = pos.longitude_i * 1e-7;
+                    int32_t alt = pos.altitude;
+                    
+                    // Update node location for map
+                    updateNodeLocation(nodeId.c_str(), nodeName.c_str(), lat, lon, alt);
+                    
+                    sendLocationToTelegram(nodeName.c_str(), lat, lon, alt);
+                }
+            }
+            break;
+        }
+        
+        case meshtastic_PortNum_TELEMETRY_APP: {
+            // Decode telemetry
+            meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_zero;
+            if (pb_decode_from_bytes(mp.decoded.payload.bytes, mp.decoded.payload.size,
+                                    &meshtastic_Telemetry_msg, &telemetry)) {
+                String telemetryData = "Telemetry received";
+                // Format telemetry data based on variant
+                if (telemetry.which_variant == meshtastic_Telemetry_device_metrics_tag) {
+                    telemetryData = String("Battery: ") + String(telemetry.variant.device_metrics.battery_level) + "%";
+                }
+                sendTelemetryToTelegram(nodeName.c_str(), telemetryData.c_str());
+            }
+            break;
+        }
+        
+        default:
+            break;
+    }
+    
+    // Allow other modules to process this packet
+    return ProcessMessage::CONTINUE;
+}
+
+void TelegramModule::sendMessageToTelegram(const char* from, const char* message)
+{
+    if (!_bot) return;
+    
+    String formatted = "📡 *Mesh Message*\n";
+    formatted += "*From:* " + String(from) + "\n";
+    formatted += "*Message:* " + String(message);
+    
+    LOG_INFO("TelegramModule: Forwarding to Telegram: %s\n", formatted.c_str());
+    
+    if (!_chatId.isEmpty()) {
+        _bot->sendMessage(_chatId, formatted, "Markdown");
+    }
+}
+
+void TelegramModule::sendLocationToTelegram(const char* from, double lat, double lon, int32_t alt)
+{
+    if (!_bot) return;
+    
+    String formatted = "📍 *Location Shared*\n";
+    formatted += "*From:* " + String(from) + "\n";
+    formatted += "*Coordinates:* " + String(lat, 6) + ", " + String(lon, 6) + "\n";
+    formatted += "*Altitude:* " + String(alt) + "m\n";
+    formatted += "*Map:* https://www.google.com/maps?q=" + String(lat, 6) + "," + String(lon, 6);
+    
+    LOG_INFO("TelegramModule: Forwarding location to Telegram\n");
+    
+    if (!_chatId.isEmpty()) {
+        _bot->sendMessage(_chatId, formatted, "Markdown");
+    }
+}
+
+void TelegramModule::sendTelemetryToTelegram(const char* from, const char* data)
+{
+    if (!_bot) return;
+    
+    String formatted = "📊 *Telemetry*\n";
+    formatted += "*From:* " + String(from) + "\n";
+    formatted += "*Data:* " + String(data);
+    
+    LOG_INFO("TelegramModule: Forwarding telemetry to Telegram\n");
+    
+    if (!_chatId.isEmpty()) {
+        _bot->sendMessage(_chatId, formatted, "Markdown");
+    }
+}
+
+// Node tracking functions
+void TelegramModule::updateNodeSeen(const char* nodeId, const char* nodeName)
+{
+    // Check if node already exists
+    for (int i = 0; i < _nodeCount; i++) {
+        if (strcmp(_nodes[i].nodeId, nodeId) == 0) {
+            _nodes[i].lastSeen = millis();
+            strncpy(_nodes[i].nodeName, nodeName, sizeof(_nodes[i].nodeName) - 1);
+            return;
+        }
+    }
+    
+    // Add new node if space available
+    if (_nodeCount < MAX_NODES) {
+        strncpy(_nodes[_nodeCount].nodeId, nodeId, sizeof(_nodes[_nodeCount].nodeId) - 1);
+        strncpy(_nodes[_nodeCount].nodeName, nodeName, sizeof(_nodes[_nodeCount].nodeName) - 1);
+        _nodes[_nodeCount].lastSeen = millis();
+        _nodes[_nodeCount].hasLocation = false;
+        _nodes[_nodeCount].latitude = 0.0;
+        _nodes[_nodeCount].longitude = 0.0;
+        _nodes[_nodeCount].altitude = 0;
+        _nodeCount++;
+        LOG_INFO("TelegramModule: New node tracked: %s (%s)\n", nodeName, nodeId);
+    }
+}
+
+void TelegramModule::updateNodeLocation(const char* nodeId, const char* nodeName, double lat, double lon, int32_t alt)
+{
+    // Check if node already exists
+    for (int i = 0; i < _nodeCount; i++) {
+        if (strcmp(_nodes[i].nodeId, nodeId) == 0) {
+            _nodes[i].lastSeen = millis();
+            strncpy(_nodes[i].nodeName, nodeName, sizeof(_nodes[i].nodeName) - 1);
+            _nodes[i].latitude = lat;
+            _nodes[i].longitude = lon;
+            _nodes[i].altitude = alt;
+            _nodes[i].hasLocation = true;
+            return;
+        }
+    }
+    
+    // Add new node if space available
+    if (_nodeCount < MAX_NODES) {
+        strncpy(_nodes[_nodeCount].nodeId, nodeId, sizeof(_nodes[_nodeCount].nodeId) - 1);
+        strncpy(_nodes[_nodeCount].nodeName, nodeName, sizeof(_nodes[_nodeCount].nodeName) - 1);
+        _nodes[_nodeCount].lastSeen = millis();
+        _nodes[_nodeCount].latitude = lat;
+        _nodes[_nodeCount].longitude = lon;
+        _nodes[_nodeCount].altitude = alt;
+        _nodes[_nodeCount].hasLocation = true;
+        _nodeCount++;
+        LOG_INFO("TelegramModule: New node with location tracked: %s (%s)\n", nodeName, nodeId);
+    }
+}
+
+void TelegramModule::clearStaleNodes(unsigned long maxAge)
+{
+    unsigned long now = millis();
+    int newCount = 0;
+    
+    for (int i = 0; i < _nodeCount; i++) {
+        if (now - _nodes[i].lastSeen < maxAge) {
+            if (i != newCount) {
+                _nodes[newCount] = _nodes[i];
+            }
+            newCount++;
+        }
+    }
+    
+    if (newCount != _nodeCount) {
+        LOG_INFO("TelegramModule: Cleared %d stale nodes\n", _nodeCount - newCount);
+        _nodeCount = newCount;
+    }
+}
+
+int TelegramModule::getNodeCount()
+{
+    return _nodeCount;
+}
+
+int TelegramModule::getNodesWithLocation()
+{
+    int count = 0;
+    for (int i = 0; i < _nodeCount; i++) {
+        if (_nodes[i].hasLocation) {
+            count++;
+        }
+    }
+    return count;
+}
+
+String TelegramModule::getNodeList()
+{
+    String list = "";
+    
+    for (int i = 0; i < _nodeCount; i++) {
+        list += "• *" + String(_nodes[i].nodeName) + "*\n";
+        list += "  ID: `" + String(_nodes[i].nodeId) + "`\n";
+        
+        if (_nodes[i].hasLocation) {
+            list += "  📍 GPS: " + String(_nodes[i].latitude, 6) + ", " + String(_nodes[i].longitude, 6) + "\n";
+        }
+        
+        list += "  Last seen: " + formatTimeAgo(millis() - _nodes[i].lastSeen) + "\n\n";
+    }
+    
+    return list;
+}
+
+String TelegramModule::generateMapUrl()
+{
+    // Generate Google Maps URL with multiple markers
+    // Format: https://www.google.com/maps/dir/?api=1&waypoints=lat1,lon1|lat2,lon2|...
+    
+    String url = "https://www.google.com/maps/dir/?api=1&waypoints=";
+    bool firstNode = true;
+    
+    for (int i = 0; i < _nodeCount; i++) {
+        if (_nodes[i].hasLocation) {
+            if (!firstNode) {
+                url += "|";
+            }
+            url += String(_nodes[i].latitude, 6) + "," + String(_nodes[i].longitude, 6);
+            firstNode = false;
+        }
+    }
+    
+    // Add travelmode to make it show all points
+    url += "&travelmode=driving";
+    
+    return url;
+}
+
+String TelegramModule::getNodeIdString(NodeNum nodeNum)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "!%08x", nodeNum);
+    return String(buf);
+}
+
+String TelegramModule::getNodeName(NodeNum nodeNum)
+{
+    const meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(nodeNum);
+    if (node && node->has_user && node->user.long_name[0]) {
+        return String(node->user.long_name);
+    }
+    return getNodeIdString(nodeNum);
+}
+
+String TelegramModule::formatTimeAgo(unsigned long ms)
+{
+    if (ms < 1000) {
+        return String(ms) + "ms ago";
+    } else if (ms < 60000) {
+        return String(ms / 1000) + "s ago";
+    } else if (ms < 3600000) {
+        return String(ms / 60000) + "m ago";
+    } else {
+        return String(ms / 3600000) + "h ago";
+    }
+}
+
+void TelegramModule::handleWebAppData(const String &jsonData, const String &chatId)
+{
+    LOG_INFO("TelegramModule: Received web app data: %s\n", jsonData.c_str());
+    
+    // Simple JSON parsing (no library needed for our simple structure)
+    String action = "";
+    String mode = "";
+    String wifi_ssid = "";
+    String wifi_password = "";
+    String bot_token = "";
+    String chat_id = "";
+    
+    // Extract action
+    int actionStart = jsonData.indexOf("\"action\":\"") + 10;
+    int actionEnd = jsonData.indexOf("\"", actionStart);
+    if (actionStart > 9 && actionEnd > actionStart) {
+        action = jsonData.substring(actionStart, actionEnd);
+    }
+    
+    if (action == "get_status") {
+        // Send current configuration status
+        String response = "📊 *Current Configuration*\n\n";
+        response += "WiFi SSID: " + webConfigModule->getWiFiSSID() + "\n";
+        response += "WiFi Signal: " + String(WiFi.RSSI()) + " dBm\n";
+        response += "Bot Token: Configured ✅\n";
+        response += "Chat ID: " + String(webConfigModule->getChatID()) + "\n";
+        response += "LoRa Region: " + String(webConfigModule->getLoRaRegion()) + "\n";
+        response += "LoRa Modem: " + String(webConfigModule->getLoRaModemPreset()) + "\n";
+        
+        _bot->sendMessage(chatId, response, "Markdown");
+        return;
+    }
+    
+    if (action == "save_config") {
+        // Extract WiFi credentials
+        int ssidStart = jsonData.indexOf("\"wifi_ssid\":\"") + 13;
+        int ssidEnd = jsonData.indexOf("\"", ssidStart);
+        if (ssidStart > 12 && ssidEnd > ssidStart) {
+            wifi_ssid = jsonData.substring(ssidStart, ssidEnd);
+        }
+        
+        int passStart = jsonData.indexOf("\"wifi_password\":\"") + 17;
+        int passEnd = jsonData.indexOf("\"", passStart);
+        if (passStart > 16 && passEnd > passStart) {
+            wifi_password = jsonData.substring(passStart, passEnd);
+        }
+        
+        // Extract Telegram credentials
+        int tokenStart = jsonData.indexOf("\"bot_token\":\"") + 13;
+        int tokenEnd = jsonData.indexOf("\"", tokenStart);
+        if (tokenStart > 12 && tokenEnd > tokenStart) {
+            bot_token = jsonData.substring(tokenStart, tokenEnd);
+        }
+        
+        int chatIdStart = jsonData.indexOf("\"chat_id\":\"") + 11;
+        int chatIdEnd = jsonData.indexOf("\"", chatIdStart);
+        if (chatIdStart > 10 && chatIdEnd > chatIdStart) {
+            chat_id = jsonData.substring(chatIdStart, chatIdEnd);
+        }
+        
+        // Extract LoRa settings (optional - use defaults if not provided)
+        int lora_region = 3;  // Default: EU_868
+        int lora_modem = 0;   // Default: LONG_FAST
+        
+        int regionStart = jsonData.indexOf("\"lora_region\":") + 14;
+        if (regionStart > 13) {
+            int regionEnd = jsonData.indexOf(",", regionStart);
+            if (regionEnd == -1) regionEnd = jsonData.indexOf("}", regionStart);
+            if (regionEnd > regionStart) {
+                String regionStr = jsonData.substring(regionStart, regionEnd);
+                regionStr.trim();
+                lora_region = regionStr.toInt();
+            }
+        }
+        
+        int modemStart = jsonData.indexOf("\"lora_modem\":") + 13;
+        if (modemStart > 12) {
+            int modemEnd = jsonData.indexOf(",", modemStart);
+            if (modemEnd == -1) modemEnd = jsonData.indexOf("}", modemStart);
+            if (modemEnd > modemStart) {
+                String modemStr = jsonData.substring(modemStart, modemEnd);
+                modemStr.trim();
+                lora_modem = modemStr.toInt();
+            }
+        }
+        
+        // Validate
+        if (wifi_ssid.length() == 0 || wifi_password.length() == 0 || 
+            bot_token.length() == 0 || chat_id.length() == 0) {
+            _bot->sendMessage(chatId, "❌ Error: All fields are required!", "");
+            return;
+        }
+        
+        LOG_INFO("TelegramModule: Saving configuration\n");
+        LOG_INFO("  WiFi: %s\n", wifi_ssid.c_str());
+        LOG_INFO("  Bot Token: %s\n", bot_token.substring(0, 10).c_str());
+        LOG_INFO("  Chat ID: %s\n", chat_id.c_str());
+        LOG_INFO("  LoRa Region: %d\n", lora_region);
+        LOG_INFO("  LoRa Modem: %d\n", lora_modem);
+        
+        String response = "✅ *Configuration Saved!*\n\n";
+        response += "Device will reboot in 5 seconds.\n\n";
+        response += "_New settings:_\n";
+        response += "• WiFi: " + wifi_ssid + "\n";
+        response += "• Chat ID: " + chat_id + "\n";
+        response += "• LoRa Region: " + String(lora_region) + "\n";
+        response += "• LoRa Modem: " + String(lora_modem) + "\n";
+        
+        _bot->sendMessage(chatId, response, "Markdown");
+        
+        // Save full configuration to NVS (including LoRa settings)
+        webConfigModule->setConfiguration(wifi_ssid, wifi_password, bot_token, chat_id, 
+                                         lora_region, lora_modem);
+        
+        // Reboot after delay
+        delay(5000);
+        ESP.restart();
+        return;
+    }
+}
+
+#endif // TELEGRAM_ENABLED
+#endif // ARCH_ESP32
+

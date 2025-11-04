@@ -1,0 +1,58 @@
+// Custom ESP32 LoRa 868MHz with SX1276 and OLED Display
+// OLED is connected via I2C on Heltec-style pins
+
+// For OLED LCD - Heltec-style I2C pins (only if NO_SCREEN is not defined)
+#ifndef NO_SCREEN
+#define I2C_SDA 4
+#define I2C_SCL 15
+#define USE_SSD1306  // Define the OLED type
+#define RESET_OLED 16 // Reset pin for OLED display
+#endif
+
+// GPS - uncomment if you have GPS module
+#undef GPS_RX_PIN
+#undef GPS_TX_PIN
+// #define GPS_RX_PIN 16
+// #define GPS_TX_PIN 17
+
+#define BUTTON_PIN 0   // Boot button on most ESP32 dev boards
+#define LED_PIN 25     // LED connected to GPIO 25
+
+// Battery monitoring - adjust if you have battery voltage divider
+// #define BATTERY_PIN 35
+// #define ADC_CHANNEL ADC1_GPIO35_CHANNEL
+// #define ADC_MULTIPLIER 2.0
+
+// LoRa SX1276/RFM95 Configuration
+#define USE_RF95       // Enable RFM95/SX127x support
+
+// Standard ESP32 SPI pins
+#define LORA_SCK 5
+#define LORA_MISO 19
+#define LORA_MOSI 27
+#define LORA_CS 18
+
+// LoRa control pins for SX1276
+#define LORA_DIO0 26   // IRQ pin for SX1276
+#define LORA_RESET 14  // Reset pin
+#define LORA_DIO1 33   // Optional, depends on your board
+#define LORA_DIO2 32   // Optional
+
+// RX/TX control pins if your board has RF switch
+// Uncomment if your board has TXEN/RXEN pins
+// #define RF95_RXEN 13
+// #define RF95_TXEN 12
+
+// Maximum transmit power for SX1276
+#define RF95_MAX_POWER 20
+
+// ============================================
+// Telegram Gateway Configuration
+// ============================================
+// To enable Telegram Gateway, define these in platformio.ini:
+// -DTELEGRAM_ENABLED
+// -DTELEGRAM_BOT_TOKEN="your_bot_token"
+// -DTELEGRAM_CHAT_ID="your_chat_id"
+// -DWIFI_SSID="your_ssid"
+// -DWIFI_PASSWORD="your_password"
+

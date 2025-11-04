@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Meshtastic Gateway Config</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🛰️ Meshtastic Gateway</h1>
+            <p class="subtitle">Configure your Telegram Gateway</p>
+        </header>
+
+        <div id="status-card" class="card status-card">
+            <div class="status-header">
+                <span class="status-icon">📡</span>
+                <span id="current-mode" class="status-text">Loading...</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>⚙️ Configuration</h2>
+            
+            <div class="form-group">
+                <label for="mode">Operating Mode</label>
+                <select id="mode" class="input">
+                    <option value="TELEGRAM">📡 TELEGRAM (Gateway Mode)</option>
+                    <option value="DEFAULT">📱 DEFAULT (Standard Meshtastic)</option>
+                </select>
+                <p class="hint">Switch between gateway and standard Meshtastic mode</p>
+            </div>
+
+            <div id="telegram-config" class="telegram-config">
+                <h3>WiFi Settings</h3>
+                
+                <div class="form-group">
+                    <label for="wifi-ssid">WiFi SSID</label>
+                    <input type="text" id="wifi-ssid" class="input" placeholder="Your WiFi Network">
+                </div>
+
+                <div class="form-group">
+                    <label for="wifi-password">WiFi Password</label>
+                    <input type="password" id="wifi-password" class="input" placeholder="Your WiFi Password">
+                    <button type="button" class="toggle-password" onclick="togglePassword('wifi-password')">👁️</button>
+                </div>
+
+                <h3>Telegram Settings</h3>
+                
+                <div class="form-group">
+                    <label for="bot-token">Bot Token</label>
+                    <input type="password" id="bot-token" class="input" placeholder="123456:ABC-DEF...">
+                    <button type="button" class="toggle-password" onclick="togglePassword('bot-token')">👁️</button>
+                    <p class="hint">Get from @BotFather</p>
+                </div>
+
+                <div class="form-group">
+                    <label for="chat-id">Chat ID</label>
+                    <input type="text" id="chat-id" class="input" placeholder="123456789">
+                    <p class="hint">Get from @userinfobot</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="card info-card">
+            <h3>ℹ️ How It Works</h3>
+            <ul class="info-list">
+                <li><strong>TELEGRAM Mode:</strong> Gateway active, messages forwarded</li>
+                <li><strong>DEFAULT Mode:</strong> Standard Meshtastic, no WiFi</li>
+                <li><strong>Changes take effect:</strong> After device reboot (~30 seconds)</li>
+            </ul>
+        </div>
+
+        <div class="button-group">
+            <button id="save-btn" class="btn btn-primary" onclick="saveConfig()">
+                💾 Save & Reboot
+            </button>
+            <button id="cancel-btn" class="btn btn-secondary" onclick="closeApp()">
+                ❌ Cancel
+            </button>
+        </div>
+
+        <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Saving configuration...</p>
+        </div>
+
+        <div id="success" class="message success hidden">
+            <span class="icon">✅</span>
+            <div class="text">
+                <strong>Configuration Saved!</strong>
+                <p>Device will reboot in a few seconds...</p>
+            </div>
+        </div>
+
+        <div id="error" class="message error hidden">
+            <span class="icon">❌</span>
+            <div class="text">
+                <strong>Error!</strong>
+                <p id="error-message">Failed to save configuration</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,119 @@
+# ========================================
+# Meshtastic-Telegram Gateway .gitignore
+# ========================================
+
+# ========================================
+# MESHTASTIC ORIGINAL FIRMWARE (EXCLUDED)
+# ========================================
+# This is downloaded from https://github.com/meshtastic/firmware
+# Users should clone it separately as a submodule or direct download
+Meshtastic_original/
+
+# ========================================
+# BUILD ARTIFACTS & PLATFORMIO
+# ========================================
+.pio/
+**/.pio/
+.vscode/
+**/.vscode/
+.clang_complete
+.gcc-flags.json
+
+# Build outputs
+*.bin
+*.elf
+*.hex
+*.map
+*.a
+*.o
+firmware.factory.bin
+partitions_ota_swap.bin
+
+# ========================================
+# PYTHON
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+
+# ========================================
+# OPERATING SYSTEMS
+# ========================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# ========================================
+# IDEs & EDITORS
+# ========================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ========================================
+# LOGS & TEMPORARY FILES
+# ========================================
+*.log
+logs/
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ========================================
+# USER-SPECIFIC & SENSITIVE FILES
+# ========================================
+# These should NEVER be committed
+userPrefs.jsonc
+config.yaml
+secrets.h
+*.key
+*.pem
+
+# User credentials (if accidentally created)
+wifi_credentials.h
+telegram_credentials.h
+
+# Backup files
+*.bak
+*.backup
+
+# ========================================
+# GIT & VERSION CONTROL
+# ========================================
+.git/
+.gitattributes
+
+# ========================================
+# PROJECT-SPECIFIC NOTES
+# ========================================
+# Users should:
+# 1. Clone this repository
+# 2. Clone Meshtastic firmware separately:
+#    git clone https://github.com/meshtastic/firmware Meshtastic_original/firmware
+# 3. Apply modifications from modified_meshtastic_files/
+# 4. Build using ./flash_complete_system.sh

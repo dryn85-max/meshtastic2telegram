@@ -1,0 +1,173 @@
+/**
+ * @file TelegramCommandHandler.cpp
+ * @brief Implementation of Telegram command handling
+ * 
+ * This class extracts command handling logic from TelegramModule
+ * to improve code organization and maintainability.
+ */
+
+#include "TelegramCommandHandler.h"
+#include "TelegramModule.h"
+#include "WebConfigModule.h"
+#include <WiFi.h>
+
+extern WebConfigModule *webConfigModule;
+
+TelegramCommandHandler::TelegramCommandHandler(TelegramModule* module, UniversalTelegramBot* bot)
+    : _module(module), _bot(bot) {
+}
+
+bool TelegramCommandHandler::handleCommand(const String& chatId, const String& text) {
+    if (text == "/start" || text == "/help") {
+        handleHelp(chatId);
+        return true;
+    }
+    
+    if (text == "/config") {
+        handleConfig(chatId);
+        return true;
+    }
+    
+    if (text == "/nodes") {
+        handleNodes(chatId);
+        return true;
+    }
+    
+    if (text == "/map") {
+        handleMap(chatId);
+        return true;
+    }
+    
+    if (text == "/status") {
+        handleStatus(chatId);
+        return true;
+    }
+    
+    return false; // Command not recognized
+}
+
+void TelegramCommandHandler::handleHelp(const String& chatId) {
+    String help = "🤖 *Meshtastic-Telegram Gateway*\n\n";
+    help += "*Commands:*\n";
+    help += "/help - Show this help\n";
+    help += "/config - Configure gateway settings\n";
+    help += "/nodes - List visible mesh nodes\n";
+    help += "/map - Show nodes on interactive map\n";
+    help += "/status - Show gateway status\n\n";
+    help += "*Send Messages:*\n";
+    help += "Just type your message to broadcast to mesh network (channel 0)";
+    
+    _bot->sendMessage(chatId, help, "Markdown");
+}
+
+void TelegramCommandHandler::handleConfig(const String& chatId) {
+    Serial.println("[TelegramCommandHandler] Processing /config command");
+    
+    String response = formatConfig();
+    
+    Serial.println("[TelegramCommandHandler] Sending /config response...");
+    bool sent = _bot->sendMessage(chatId, response, "");
+    if (sent) {
+        Serial.println("[TelegramCommandHandler] /config response sent successfully");
+    } else {
+        Serial.println("[TelegramCommandHandler] Failed to send /config response");
+    }
+}
+
+void TelegramCommandHandler::handleNodes(const String& chatId) {
+    // This will be delegated to TelegramModule for now
+    // In future refactoring, move node tracking here
+    Serial.println("[TelegramCommandHandler] /nodes command - delegating to TelegramModule");
+}
+
+void TelegramCommandHandler::handleMap(const String& chatId) {
+    // This will be delegated to TelegramModule for now
+    Serial.println("[TelegramCommandHandler] /map command - delegating to TelegramModule");
+}
+
+void TelegramCommandHandler::handleStatus(const String& chatId) {
+    String status = formatStatus();
+    _bot->sendMessage(chatId, status, "Markdown");
+}
+
+String TelegramCommandHandler::formatConfig() {
+    int loraRegion = _storage.getLoRaRegion();
+    int loraModem = _storage.getLoRaModemPreset();
+    
+    Serial.printf("[TelegramCommandHandler] LoRa Region from NVS: %d\n", loraRegion);
+    Serial.printf("[TelegramCommandHandler] LoRa Modem from NVS: %d\n", loraModem);
+    
+    String regionName = getLoRaRegionName(loraRegion);
+    String modemName = getLoRaModemName(loraModem);
+    
+    String response = "⚙️ Gateway Configuration\n\n";
+    response += "Current Settings:\n";
+    
+    if (webConfigModule) {
+        response += "• WiFi: " + webConfigModule->getWiFiSSID() + "\n";
+        response += "• Signal: " + String(WiFi.RSSI()) + " dBm\n";
+    }
+    
+    response += "• LoRa Region: " + regionName + "\n";
+    response += "• LoRa Preset: " + modemName + "\n\n";
+    
+    response += "To Change Settings:\n";
+    response += "1. Power off device\n";
+    response += "2. Hold BOOT 3 sec\n";
+    response += "3. WiFi: MG-Config\n";
+    response += "4. Open: 192.168.4.1\n";
+    response += "5. Save & reboot";
+    
+    return response;
+}
+
+String TelegramCommandHandler::formatStatus() {
+    String status = "📊 *Gateway Status*\n\n";
+    status += "WiFi: ✅ Connected\n";
+    status += "IP: " + WiFi.localIP().toString() + "\n";
+    status += "Signal: " + String(WiFi.RSSI()) + " dBm\n";
+    // Note: Node count will be added when we refactor node tracking
+    status += "Uptime: " + String(millis() / 1000) + "s";
+    
+    return status;
+}
+
+String TelegramCommandHandler::getLoRaRegionName(int region) {
+    switch (region) {
+        case 1: return "US";
+        case 2: return "EU_433";
+        case 3: return "EU_868";
+        case 4: return "CN";
+        case 5: return "JP";
+        case 6: return "ANZ";
+        case 7: return "KR";
+        case 8: return "TW";
+        case 9: return "RU";
+        case 10: return "IN";
+        default: return "UNSET";
+    }
+}
+
+String TelegramCommandHandler::getLoRaModemName(int modem) {
+    switch (modem) {
+        case 0: return "LONG_FAST";
+        case 1: return "LONG_SLOW";
+        case 2: return "VERY_LONG_SLOW";
+        case 3: return "MEDIUM_SLOW";
+        case 4: return "MEDIUM_FAST";
+        case 5: return "SHORT_SLOW";
+        case 6: return "SHORT_FAST";
+        case 7: return "LONG_MODERATE";
+        default: return "LONG_FAST";
+    }
+}
+
+int TelegramCommandHandler::getNodesWithLocation() {
+    // TODO: Implement node tracking in this class
+    return 0;
+}
+
+void TelegramCommandHandler::clearStaleNodes() {
+    // TODO: Implement node tracking in this class
+}
+

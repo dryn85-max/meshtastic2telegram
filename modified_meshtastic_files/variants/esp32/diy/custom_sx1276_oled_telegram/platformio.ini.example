@@ -1,0 +1,146 @@
+; ===================================================================
+; GATEWAY FIRMWARE - Full Mesh + Telegram (NO BLE, NO OLED)
+; Optimized for stable SSL/TLS operations with Telegram Bot API
+; ===================================================================
+[env:custom-sx1276-telegram-gateway]
+extends = esp32_base
+board = esp32doit-devkit-v1
+board_check = true
+
+; Use custom OTA-swap partition table
+board_build.partitions = variants/esp32/diy/custom_sx1276_oled_telegram/partitions_ota_swap.csv
+board_upload.maximum_size = 3080192
+
+; Exclude motion and sensor source files
+build_src_filter =
+  ${esp32_base.build_src_filter}
+  -<motion/>
+  -<sensors/>
+
+lib_deps =
+  ${esp32_base.lib_deps}
+  bblanchon/ArduinoJson@^6.21.3
+  witnessmenow/UniversalTelegramBot@^1.3.0
+  esphome/ESPAsyncWebServer-esphome@^3.1.0
+  ; Note: We include ESPAsyncWebServer to avoid compilation errors,
+  ; but the web server won't actually be started in gateway mode
+  ; NO NimBLE - BLE completely disabled
+  ; NO OLED library - Display disabled
+
+lib_ignore =
+  NimBLE-Arduino
+  ArduinoBLE
+  ; Exclude ALL sensor libraries (not needed for gateway)
+  Adafruit BME280 Library
+  Adafruit BME680 Library
+  Adafruit MCP9808 Library
+  Adafruit INA260 Library
+  Adafruit INA219
+  Adafruit Unified Sensor
+  Adafruit BusIO
+  Adafruit SSD1306
+  Adafruit GFX Library
+  Adafruit SHT31 Library
+  Adafruit SHTC3 Library
+  Adafruit SHT4x Library
+  Adafruit LPS2X
+  Adafruit BMP3XX Library
+  Adafruit LSM6DS
+  Adafruit LIS3DH
+  Adafruit MPU6050
+  Adafruit PM25 AQI Sensor
+  Adafruit TSL2591 Library
+  Adafruit TSL2561
+  Adafruit VEML7700 Library
+  Adafruit LTR390 Library
+  Adafruit PCT2075
+  Adafruit DPS310
+  Adafruit MAX1704X
+  Adafruit MLX90614 Library
+  EmotiBit MLX90632
+  ClosedCube OPT3001
+  INA3221
+  INA226
+  QMC5883LCompass
+  DFRobot_BMM150
+  DFRobot_RTU
+  DFRobot_RainfallSensor
+  DFRobot_LarkWeatherStation
+  SparkFun MAX3010x Pulse and Proximity Sensor Library
+  SparkFun 9DoF IMU Breakout - ICM 20948 - Arduino Library
+  SparkFun Qwiic Scale NAU7802 Arduino Library
+  BME68x Sensor library
+  bsec2
+  Sensirion Core
+  Sensirion I2C SCD4x
+  Adafruit BMP280 Library
+  Adafruit BMP085 Library
+  Adafruit AHTX0
+
+build_flags =
+  ${esp32_base.build_flags}
+  -D PRIVATE_HW
+  -D GATEWAY_MODE=1
+  -I variants/esp32/diy/custom_sx1276_oled_telegram
+  
+  ; ===== DEVICE ROLE - ROUTER MODE FOR STATIONARY GATEWAY =====
+  -D USERPREFS_CONFIG_DEVICE_ROLE=meshtastic_Config_DeviceConfig_Role_ROUTER
+  
+  ; ===== DISPLAY - COMPLETELY DISABLED =====
+  -D NO_SCREEN=1
+  -D HAS_SCREEN=0
+  -D USE_SH1106=0
+  -D USE_SSD1306=0
+  
+  ; ===== BLUETOOTH - COMPLETELY DISABLED =====
+  -D NO_BLE=1
+  -D CONFIG_BT_ENABLED=0
+  -D CONFIG_BLUEDROID_ENABLED=0
+  -D CONFIG_NIMBLE_ENABLED=0
+  -D MESHTASTIC_EXCLUDE_BLUETOOTH=1
+  
+  ; ===== GATEWAY MODE ENABLED =====
+  -D GATEWAY_MODE=1
+  
+  ; ===== TELEGRAM ENABLED - READ FROM NVS =====
+  -D TELEGRAM_ENABLED=1
+  -D TELEGRAM_USE_NVS=1
+  
+  ; ===== KEEP FULL MESH FUNCTIONALITY =====
+  ; NOTE: We keep mesh routing, node DB, packet history
+  ; Removing BLE (~30KB) + OLED (~15KB) = ~45KB more RAM for SSL
+  
+  ; ===== EXCLUDE ONLY NON-ESSENTIAL MODULES =====
+  -D MESHTASTIC_EXCLUDE_AUDIO=1
+  -D MESHTASTIC_EXCLUDE_PAXCOUNTER=1
+  -D MESHTASTIC_EXCLUDE_STOREFORWARD=1
+  -D MESHTASTIC_EXCLUDE_REMOTEHARDWARE=1
+  -D MESHTASTIC_EXCLUDE_RANGETEST=1
+  -D MESHTASTIC_EXCLUDE_DETECTIONSENSOR=1
+  -D MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR=1
+  -D MESHTASTIC_EXCLUDE_POWER_TELEMETRY=1
+  -D MESHTASTIC_EXCLUDE_TRACEROUTE=1
+  -D MESHTASTIC_EXCLUDE_NEIGHBORINFO=1
+  -D MESHTASTIC_EXCLUDE_WAYPOINT=1
+  -D MESHTASTIC_EXCLUDE_CANNED_MESSAGES=1
+  -D HAS_ACCELEROMETER=0
+  -D HAS_MOTION_SENSOR=0
+  
+  ; ===== BUFFER OPTIMIZATIONS =====
+  -D MAX_PACKETS=50
+  -D MAX_NUM_NODES=20
+  -D MESHTASTIC_MAX_CHANNELS=4
+  -D DEFAULT_MIN_APP_VERSION_TO_SEND=0
+  -D PACKETHISTORY_MAX=50
+  
+  ; ===== DISABLE UNNECESSARY FEATURES =====
+  -D CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH=0
+  -D CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=0
+  
+  ; ===== CORE DEBUG =====
+  -D CORE_DEBUG_LEVEL=1
+
+upload_port = /dev/tty.usbserial-0001
+upload_speed = 460800
+monitor_port = /dev/tty.usbserial-0001
+monitor_speed = 115200
