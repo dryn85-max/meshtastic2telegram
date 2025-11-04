@@ -206,10 +206,11 @@ ROUTER mode indicators:
 ## 📚 Documentation
 
 ### Project Documentation
+- [`SETUP.md`](SETUP.md) – Complete setup and installation guide
 - [`docs/USER_BOOTLOADER_README.md`](docs/USER_BOOTLOADER_README.md) – Details of the OTA swap user bootloader
 - [`docs/OTA_SWAP_README.md`](docs/OTA_SWAP_README.md) – Flash layout, boot flow, troubleshooting
-- [`docs/AI_DEVELOPMENT_SPEC.md`](docs/AI_DEVELOPMENT_SPEC.md) – Complete technical specification for AI assistants
-- [`docs/HOW_TO_REQUEST_FEATURES.md`](docs/HOW_TO_REQUEST_FEATURES.md) – Guide for requesting new features
+- [`docs/MESHTASTIC_MODIFICATIONS.md`](docs/MESHTASTIC_MODIFICATIONS.md) – Technical details of firmware modifications
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) – Version history and migration guides
 - [`docs/hardware/pinout.md`](docs/hardware/pinout.md) – Hardware pinout and GPIO configuration
 
 ### Meshtastic Firmware Modifications
